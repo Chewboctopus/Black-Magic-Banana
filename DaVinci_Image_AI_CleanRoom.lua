@@ -2243,31 +2243,43 @@ local function build_ui()
         set_movie_status(msg)
     end
 
-    for i = 1, 8 do
-        local id = "imgRefBtn" .. tostring(i)
-        win.On[id].Clicked = function()
-            if App.State.image_refs[i] and App.State.image_refs[i] ~= "" then
-                clear_ref_slot("image", i)
-                refresh_slot_buttons()
-                set_image_status("Cleared slot " .. tostring(i))
-            end
+    local function on_img_ref_clicked(i)
+        if App.State.image_refs[i] and App.State.image_refs[i] ~= "" then
+            clear_ref_slot("image", i)
+            refresh_slot_buttons()
+            set_image_status("Cleared slot " .. tostring(i))
         end
     end
 
-    for i = 1, 8 do
-        local id = "movieRefBtn" .. tostring(i)
-        win.On[id].Clicked = function()
-            if i > (App.State.movie_max_refs or 0) then
-                set_movie_status("Slot " .. tostring(i) .. " is unsupported for current model.")
-                return
-            end
-            if App.State.movie_refs[i] and App.State.movie_refs[i] ~= "" then
-                clear_ref_slot("movie", i)
-                refresh_slot_buttons()
-                set_movie_status("Cleared movie slot " .. tostring(i))
-            end
+    local function on_movie_ref_clicked(i)
+        if i > (App.State.movie_max_refs or 0) then
+            set_movie_status("Slot " .. tostring(i) .. " is unsupported for current model.")
+            return
+        end
+        if App.State.movie_refs[i] and App.State.movie_refs[i] ~= "" then
+            clear_ref_slot("movie", i)
+            refresh_slot_buttons()
+            set_movie_status("Cleared movie slot " .. tostring(i))
         end
     end
+
+    function win.On.imgRefBtn1.Clicked() on_img_ref_clicked(1) end
+    function win.On.imgRefBtn2.Clicked() on_img_ref_clicked(2) end
+    function win.On.imgRefBtn3.Clicked() on_img_ref_clicked(3) end
+    function win.On.imgRefBtn4.Clicked() on_img_ref_clicked(4) end
+    function win.On.imgRefBtn5.Clicked() on_img_ref_clicked(5) end
+    function win.On.imgRefBtn6.Clicked() on_img_ref_clicked(6) end
+    function win.On.imgRefBtn7.Clicked() on_img_ref_clicked(7) end
+    function win.On.imgRefBtn8.Clicked() on_img_ref_clicked(8) end
+
+    function win.On.movieRefBtn1.Clicked() on_movie_ref_clicked(1) end
+    function win.On.movieRefBtn2.Clicked() on_movie_ref_clicked(2) end
+    function win.On.movieRefBtn3.Clicked() on_movie_ref_clicked(3) end
+    function win.On.movieRefBtn4.Clicked() on_movie_ref_clicked(4) end
+    function win.On.movieRefBtn5.Clicked() on_movie_ref_clicked(5) end
+    function win.On.movieRefBtn6.Clicked() on_movie_ref_clicked(6) end
+    function win.On.movieRefBtn7.Clicked() on_movie_ref_clicked(7) end
+    function win.On.movieRefBtn8.Clicked() on_movie_ref_clicked(8) end
 
     local function append_token(edit, token)
         local txt = edit.PlainText or edit.Text or ""
