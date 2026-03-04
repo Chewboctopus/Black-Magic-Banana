@@ -1872,6 +1872,13 @@ local function use_selected_gallery_as_ref(tab)
     return true, "Loaded gallery image into slot " .. tostring(idx)
 end
 
+local function set_group_visible(group, is_visible)
+    if not group then return end
+    pcall(function() group.Visible = is_visible end)
+    pcall(function() group.Hidden = not is_visible end)
+    pcall(function() group.Enabled = is_visible end)
+end
+
 local function show_tab(tab)
     local items = App.State.items
     if not items then return end
@@ -1881,9 +1888,15 @@ local function show_tab(tab)
     local is_movie = (tab == "movie")
     local is_config = (tab == "config")
 
-    items.imageTabGroup.Visible = is_image
-    items.movieTabGroup.Visible = is_movie
-    items.configTabGroup.Visible = is_config
+    set_group_visible(items.imageTabGroup, is_image)
+    set_group_visible(items.movieTabGroup, is_movie)
+    set_group_visible(items.configTabGroup, is_config)
+
+    local win = App.State.win
+    if win then
+        pcall(function() win:RecalcLayout() end)
+        pcall(function() win:Update() end)
+    end
 end
 
 local function parse_veo_blocking_hint(msg)
