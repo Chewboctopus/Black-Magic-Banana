@@ -543,7 +543,8 @@ local function curl_config_request(url, headers, body_path, timeout_seconds)
     )
     run_shell_ok(cmd)
 
-    local status = tonumber((read_file(code_path, "rb") or ""):gsub("%s+", "")) or 0
+    local status_raw = (read_file(code_path, "rb") or ""):gsub("%s+", "")
+    local status = tonumber(status_raw) or 0
     local body = read_file(out_path, "rb") or ""
     local err = read_file(err_path, "rb") or ""
     if status == 0 and trim(err) ~= "" then
@@ -572,7 +573,8 @@ local function curl_get(url, headers, timeout_seconds)
 
     run_shell_ok(table.concat(cmd_parts, " "))
 
-    local status = tonumber((read_file(code_path, "rb") or ""):gsub("%s+", "")) or 0
+    local status_raw = (read_file(code_path, "rb") or ""):gsub("%s+", "")
+    local status = tonumber(status_raw) or 0
     local body = read_file(out_path, "rb") or ""
     local err = read_file(err_path, "rb") or ""
     return status, body, err
