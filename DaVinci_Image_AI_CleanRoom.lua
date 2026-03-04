@@ -401,7 +401,7 @@ local function build_ui()
         ui:Label({Text = "Model (optional)"}),
         ui:LineEdit({ID = "modelEdit", Text = App.Config.model, PlaceholderText = "model-name"}),
         ui:Label({Text = "Prompt"}),
-        ui:PlainTextEdit({ID = "promptEdit", PlainText = "Describe your transformation."}),
+        ui:TextEdit({ID = "promptEdit", PlainText = "Describe your transformation."}),
         ui:HGroup({
             Weight = 0,
             ui:Button({ID = "runBtn", Text = "Grab + Send"}),
@@ -421,7 +421,7 @@ local function build_ui()
         App.Config.api_url = items.apiUrlEdit.Text or ""
         App.Config.api_key = items.apiKeyEdit.Text or ""
         App.Config.model = items.modelEdit.Text or ""
-        local prompt = items.promptEdit.PlainText or ""
+        local prompt = items.promptEdit.PlainText or items.promptEdit.Text or ""
         set_status("Running pipeline...")
         local ok, result = call_api_with_image(prompt)
         if ok then
