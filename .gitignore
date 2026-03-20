@@ -1,3 +1,6 @@
 .DS_Store
 .snapshots/
 *.pre_restore_*.lua
+*.pptx
+*.zip
+~$*.pptx
