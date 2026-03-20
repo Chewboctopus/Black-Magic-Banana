@@ -1,9 +1,15 @@
 # Black Magic Banana
 
+## What it is
+Black Magic Banana is a DaVinci Resolve UI plugin that brings AI image and video generation natively into your workflow. It allows you to rapidly generate media, manage a gallery of outputs, and use timeline references directly via the Gemini API without leaving DaVinci Resolve.
+
+> [!WARNING]  
+> **Compatibility Note:** This plugin has currently only been tested on an **Apple M4 running macOS Tahoe** and **DaVinci Resolve Studio 20**. It may require adjustments for Windows or older Resolve versions.
+
 ## Requirements
 - **DaVinci Resolve Studio** (Scripting is restricted in the free version).
 - macOS (paths below assume the standard user library location).
-- A valid API Key (e.g., Google Gemini) entered into the script's Configuration tab.
+- A valid API Key entered into the script's Configuration tab. *(You can get a free Google Gemini key from [Google AI Studio](https://aistudio.google.com/app/apikey)).*
 
 ## Install
 1. Download a `.zip` of this repository from GitHub and extract it.
@@ -20,4 +26,4 @@
 
 ## Troubleshooting
 - If the script doesn’t appear in the menu, verify the target path exists and Resolve has been restarted.
-- If UI looks stale, close and reopen the script panel; Resolve can cache geometry/styles between runs.
+- If UI looks stale, close and reopen the script panel; or try the "refresh UI" button. Resolve can cache geometry/styles between runs.
