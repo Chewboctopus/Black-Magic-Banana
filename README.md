@@ -19,11 +19,6 @@ Black Magic Banana is a DaVinci Resolve UI plugin that brings AI image and video
    *(**Mac Tip:** In Finder, press **Cmd + Shift + G** ("Go to Folder"), paste the path above, and hit Return to jump straight to this hidden folder. Alternatively, pressing **Cmd + Shift + Period** will expose all hidden files in Finder, including the Library folder!)*
 4. Reopen the script via Resolve top menu: Workspace → Scripts → Utility → (Your Extracted Folder) → `Black Magic Banana.lua`.
 
-## Update workflow we use
-- Ensure the script panel is closed in DaVinci Resolve.
-- Replace the files in your `Utility` folder with the new versions from GitHub.
-- Reopen the script to load the new version.
-
 ## Troubleshooting
 - If the script doesn’t appear in the menu, verify the target path exists and Resolve has been restarted.
 - If UI looks stale, close and reopen the script panel; or try the "refresh UI" button. Resolve can cache geometry/styles between runs.
