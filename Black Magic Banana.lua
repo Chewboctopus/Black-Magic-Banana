@@ -4352,8 +4352,8 @@ local function build_ui()
     local function check_for_updates()
         set_config_status("Checking GitHub for updates...")
         local url = "https://raw.githubusercontent.com/Chewboctopus/Black-Magic-Banana/main/Black%20Magic%20Banana.lua"
-        local ok, status, body, err = curl_config_request(url, {}, nil, 5)
-        if ok and status == 200 and body ~= "" then
+        local status, body, err = curl_get(url, {}, 5)
+        if status == 200 and body ~= "" then
             local remote_version = body:match('script_version%s*=%s*"([^"]+)"')
             if not remote_version then
                 set_config_status("Could not parse remote version.")
