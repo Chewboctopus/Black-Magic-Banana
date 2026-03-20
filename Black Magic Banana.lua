@@ -3395,6 +3395,7 @@ local function build_ui()
                 ui:Button({ID = "cfgGeminiTestBtn", Text = "Test Gemini Key"}),
                 ui:Button({ID = "cfgSaveBtn", Text = "Save Config"}),
                 ui:Button({ID = "cfgOpenReadmeBtn", Text = "Open README"}),
+                ui:Button({ID = "cfgCheckUpdatesBtn", Text = "Check for Updates"}),
                 ui:Button({ID = "cfgGetApiKeyBtn", Text = "Get API Key"})
             }),
 
@@ -3435,7 +3436,7 @@ local function build_ui()
             "movieRefreshModelsBtn", "movieToken1Btn", "movieToken2Btn", "movieToken3Btn", "movieInlineTokenInsertBtn",
             "movieGalleryUseBtn", "movieGalleryDeleteBtn", "movieGalleryPasteBtn", "movieGalleryLoadBtn", "movieGalleryAddPoolBtn", "movieUndoRefBtn", "movieOpenResultBtn",
             "movieGrabBtn", "movieClearBtn", "movieGenerateBtn", "movieKeepEditingBtn", "movieAddPoolBtn", "moviePlayBtn", "movieCloseBtn",
-            "cfgGeminiTestBtn", "cfgSaveBtn", "cfgSaveDirBrowseBtn", "cfgPoolDirBrowseBtn", "cfgOpenReadmeBtn", "cfgGetApiKeyBtn"
+            "cfgGeminiTestBtn", "cfgSaveBtn", "cfgSaveDirBrowseBtn", "cfgPoolDirBrowseBtn", "cfgOpenReadmeBtn", "cfgCheckUpdatesBtn", "cfgGetApiKeyBtn"
         }
         for _, id in ipairs(button_ids) do
             local btn = items[id]
@@ -4339,13 +4340,35 @@ local function build_ui()
     end
 
     local function open_api_key_page()
-        local url = "https://ai.google.dev/gemini-api/docs/api-key"
+        local url = "https://aistudio.google.com/app/apikey"
         local ok = run_shell_ok("open " .. shell_quote(url) .. " >/dev/null 2>&1")
         if ok then
             set_config_status("Opened Gemini API key page.")
         else
             set_config_status("Failed to open browser for API key page.")
         end
+    end
+
+    local function check_for_updates()
+        set_config_status("Checking GitHub for updates...")
+        local url = "https://raw.githubusercontent.com/Chewboctopus/Black-Magic-Banana/main/Black%20Magic%20Banana.lua"
+        local ok, status, body, err = curl_config_request(url, {}, nil, 5)
+        if ok and status == 200 and body ~= "" then
+            local remote_version = body:match('script_version%s*=%s*"([^"]+)"')
+            if not remote_version then
+                set_config_status("Could not parse remote version.")
+            elseif remote_version ~= App.Config.script_version then
+                set_config_status("Update Available! (v" .. remote_version .. "). See README to install.")
+            else
+                set_config_status("You are up to date! (v" .. remote_version .. ")")
+            end
+        else
+            set_config_status("Update check failed (HTTP " .. tostring(status) .. ").")
+        end
+    end
+
+    function win.On.cfgCheckUpdatesBtn.Clicked()
+        check_for_updates()
     end
 
     function win.On.cfgOpenReadmeBtn.Clicked()
