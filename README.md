@@ -1,4 +1,4 @@
-# Black Magic Banana (DaVinci Image AI Clean Room)
+# Black Magic Banana
 
 ## Install (manual copy)
 1. Close DaVinci Resolve (or at least close the script panel).
