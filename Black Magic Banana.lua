@@ -4332,17 +4332,10 @@ local function build_ui()
     end
 
     local function open_readme()
-        local readme = "~/Documents/New project/README.md"
-        if not file_exists(readme) then
-            set_config_status("README not found at:\n" .. readme)
-            return
-        end
-        local ok = open_file(readme)
-        if ok then
-            set_config_status("Opened README.")
-        else
-            set_config_status("Could not open README.")
-        end
+        local readme = "https://github.com/Chewboctopus/Black-Magic-Banana#readme"
+        local cmd = "open " .. shell_quote(readme) .. " >/dev/null 2>&1"
+        run_shell_ok(cmd)
+        set_config_status("Opened README in browser.")
     end
 
     local function open_api_key_page()
