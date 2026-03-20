@@ -4340,7 +4340,7 @@ local function build_ui()
     end
 
     local function open_api_key_page()
-        local url = "https://aistudio.google.com/app/apikey"
+        local url = "https://aistudio.google.com/api-keys"
         local ok = run_shell_ok("open " .. shell_quote(url) .. " >/dev/null 2>&1")
         if ok then
             set_config_status("Opened Gemini API key page.")

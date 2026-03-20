@@ -13,7 +13,7 @@ Black Magic Banana is a DaVinci Resolve UI plugin that brings AI image and video
 ## Requirements
 - **DaVinci Resolve Studio** (Scripting is restricted in the free version).
 - macOS (paths below assume the standard user library location).
-- A valid API Key entered into the script's Configuration tab. *(You can get a free Google Gemini key from [Google AI Studio](https://aistudio.google.com/app/apikey)).*
+- A valid API Key entered into the script's Configuration tab. *(You can get a free Google Gemini key from [Google AI Studio](https://aistudio.google.com/api-keys)).*
 
 ## Install
 1. Download a `.zip` of this repository from GitHub and extract it.
