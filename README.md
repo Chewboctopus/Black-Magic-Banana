@@ -10,6 +10,7 @@
 2. Close DaVinci Resolve (or at least close the script panel).
 3. Drag the entire extracted folder into your Resolve Fusion Scripts path:
    `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/`
+   *(**Mac Tip:** In Finder, press **Cmd + Shift + G** ("Go to Folder"), paste the path above, and hit Return to jump straight to this hidden folder!)*
 4. Reopen the script via Resolve top menu: Workspace → Scripts → Utility → (Your Extracted Folder) → `Black Magic Banana.lua`.
 
 ## Update workflow we use
