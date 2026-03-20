@@ -3,6 +3,10 @@
 ## What it is
 Black Magic Banana is a DaVinci Resolve UI plugin that brings AI image and video generation natively into your workflow. It allows you to rapidly generate media, manage a gallery of outputs, and use timeline references directly via the Gemini API without leaving DaVinci Resolve.
 
+![Configuration Details](assets/BMB%20Screenshot%2001.jpg)
+![Movie Generation](assets/BMB%20Screenshot%2002.jpg)
+![Image Generation Options](assets/BMB%20Screenshot%2003.jpg)
+
 > [!WARNING]  
 > **Compatibility Note:** This plugin has currently only been tested on an **Apple M4 running macOS Tahoe** and **DaVinci Resolve Studio 20**. It may require adjustments for Windows or older Resolve versions.
 
