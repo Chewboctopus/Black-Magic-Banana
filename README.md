@@ -3,11 +3,12 @@
 ## Install (manual copy)
 1. Close DaVinci Resolve (or at least close the script panel).
 2. Copy the script file into the Resolve Fusion Scripts path:
-   - Source: `~/Documents/Black Magic Banana/Black Magic Banana.lua`
-   - Target: `/path/to/Fusion/Scripts/Utility/Black Magic Banana/Black Magic Banana.lua`
-   - Example command (already approved in this project):  
+   - Source: `DaVinci_Image_AI_CleanRoom.lua` (from this repository)
+   - Target: `~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/Black Magic Banana/Black Magic Banana.lua`
+   - Example command:  
      ```bash
-     cp "~/Documents/Black Magic Banana/Black Magic Banana.lua" "/path/to/Fusion/Scripts/Utility/Black Magic Banana/Black Magic Banana.lua"
+     mkdir -p "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/Black Magic Banana"
+     cp "DaVinci_Image_AI_CleanRoom.lua" "~/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/Black Magic Banana/Black Magic Banana.lua"
      ```
 3. Reopen the script via Resolve: Workspace → Scripts → Utility → Black Magic Banana → `Black Magic Banana.lua`.
 
