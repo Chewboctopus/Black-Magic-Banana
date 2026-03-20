@@ -17,8 +17,9 @@
 - If Resolve was open, click “Refresh UI” in the panel or reopen the script to load the new version.
 
 ## Requirements
-- DaVinci Resolve installed with Fusion scripting enabled.
-- macOS paths above assume the default user library location.
+- **DaVinci Resolve Studio** (Scripting is restricted in the free version).
+- macOS (paths above assume the default user library location).
+- A valid API Key (e.g., Google Gemini) entered into the script's Configuration tab.
 
 ## Troubleshooting
 - If the script doesn’t appear in the menu, verify the target path exists and Resolve has been restarted.
