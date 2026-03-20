@@ -3399,7 +3399,7 @@ local function build_ui()
                 ui:Button({ID = "cfgGetApiKeyBtn", Text = "Get API Key"})
             }),
 
-            ui:Label({Text = "API Key help: Google Gemini > Get API key. README covers install path and deploy steps.", Weight = 0}),
+            ui:Label({Text = "Black Magic Banana v" .. App.Config.script_version .. "  |  https://github.com/Chewboctopus/Black-Magic-Banana", Weight = 0}),
 
             ui:Label({Text = "Save Generations To", Weight = 0}),
             ui:HGroup({Weight = 0, Spacing = 6,
