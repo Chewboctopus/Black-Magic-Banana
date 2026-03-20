@@ -1,5 +1,10 @@
 # Black Magic Banana
 
+## Requirements
+- **DaVinci Resolve Studio** (Scripting is restricted in the free version).
+- macOS (paths above assume the default user library location).
+- A valid API Key (e.g., Google Gemini) entered into the script's Configuration tab.
+
 ## Install (manual copy)
 1. Close DaVinci Resolve (or at least close the script panel).
 2. Copy the script file into the Resolve Fusion Scripts path:
@@ -15,11 +20,6 @@
 ## Update workflow we use
 - Make changes in the source file above, then run the copy command to deploy.
 - If Resolve was open, click “Refresh UI” in the panel or reopen the script to load the new version.
-
-## Requirements
-- **DaVinci Resolve Studio** (Scripting is restricted in the free version).
-- macOS (paths above assume the default user library location).
-- A valid API Key (e.g., Google Gemini) entered into the script's Configuration tab.
 
 ## Troubleshooting
 - If the script doesn’t appear in the menu, verify the target path exists and Resolve has been restarted.
