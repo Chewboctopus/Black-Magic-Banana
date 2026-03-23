@@ -68,6 +68,7 @@ App.State = {
 
     last_image_path = nil,
     last_movie_path = nil,
+    last_movie_uri = nil,
     image_generating = false,
     movie_generating = false,
 
@@ -840,6 +841,18 @@ ensure_png = function(src_path)
     return src_path
 end
 
+local function ensure_jpeg(src_path)
+    if src_path:lower():match("%.jpe?g$") then
+        return src_path
+    end
+    local out = unique_path(App.Config.temp_dir, "conv", "jpg")
+    local cmd = "sips -s format jpeg " .. shell_quote(src_path) .. " --out " .. shell_quote(out) .. " >/dev/null 2>&1"
+    if run_shell_ok(cmd) and file_exists(out) then
+        return out
+    end
+    return src_path
+end
+
 local function parse_image_from_response(body)
     local mime, b64 = body:match('"inlineData"%s*:%s*%{[^}]-"mimeType"%s*:%s*"([^"]+)"[^}]-"data"%s*:%s*"([A-Za-z0-9+/=_%-%s]+)"')
     if not b64 then
@@ -1225,6 +1238,25 @@ local function load_preview_for_video(path, max_size, key_prefix)
 
     if ok then
         App.State.preview_cache[key] = out
+        return out
+    end
+    return nil
+end
+
+local function extract_video_last_frame(path)
+    if not path or not file_exists(path) then return nil end
+    if not has_cmd("ffmpeg") then return nil end
+    local out = unique_path(App.Config.temp_dir, "vext_frame", "png")
+    -- Seek 1 second from end and grab a single frame
+    local cmd = "ffmpeg -y -sseof -1 -i " .. shell_quote(path)
+        .. " -frames:v 1 " .. shell_quote(out) .. " >/dev/null 2>&1"
+    if run_shell_ok(cmd) and file_exists(out) then
+        return out
+    end
+    -- Fallback: grab first frame if end-seek fails
+    local cmd2 = "ffmpeg -y -i " .. shell_quote(path)
+        .. " -frames:v 1 " .. shell_quote(out) .. " >/dev/null 2>&1"
+    if run_shell_ok(cmd2) and file_exists(out) then
         return out
     end
     return nil
@@ -2191,8 +2223,16 @@ local function refresh_model_combos()
     end
 end
 
+local function is_video_file(path)
+    local lower = (path or ""):lower()
+    return lower:match("%.mp4$") or lower:match("%.mov$") or lower:match("%.webm$") or lower:match("%.mkv$") ~= nil
+end
+
 local function fill_ref_slot(tab, path, meta)
     if tab == "movie" then
+        if is_video_file(path) then
+            return nil, "Video files cannot be used as references. Use 'Extend Movie' to continue from a generated video."
+        end
         local max_slots = App.State.movie_max_refs or 2
         local idx = lowest_empty_slot(App.State.movie_refs, max_slots) or 1
         App.State.movie_refs[idx] = path
@@ -2452,10 +2492,10 @@ local function generate_image_gemini(prompt, refs)
 end
 
 local function image_blob_json(path, mode)
-    local png = ensure_png(path)
-    local b64 = encode_file_base64(png)
+    local img = ensure_png(path)
+    local b64 = encode_file_base64(img)
     if not b64 then return nil end
-    local mime = image_mime_from_ext(png)
+    local mime = image_mime_from_ext(img)
     local m = mode or "bytesBase64Encoded"
     if m == "imageBytes" then
         return '{"imageBytes":"' .. b64 .. '","mimeType":"' .. mime .. '"}'
@@ -2471,9 +2511,14 @@ local function build_veo_payload(prompt, refs, caps, mode, use_last_frame, use_r
         local arr = {}
         local max_ref_imgs = math.min(#refs, tonumber(caps.reference_image_max_refs) or 3)
         for i = 1, max_ref_imgs do
-            local blob = image_blob_json(refs[i], mode)
+            local ref_path = refs[i]
+            local lower = (ref_path or ""):lower()
+            if lower:match("%.mp4$") or lower:match("%.mov$") or lower:match("%.webm$") then
+                ref_path = extract_video_last_frame(ref_path) or ref_path
+            end
+            local blob = image_blob_json(ref_path, mode)
             if blob then
-                arr[#arr + 1] = '{"referenceType":"REFERENCE_TYPE_SUBJECT","referenceImage":' .. blob .. '}'
+                arr[#arr + 1] = '{"referenceType":"asset","image":' .. blob .. '}'
             end
         end
         if #arr > 0 then
@@ -2599,6 +2644,62 @@ local function poll_veo_operation(op_name)
     return false, "Timed out waiting for Veo operation."
 end
 
+local function generate_movie_extension_gemini(prompt, video_uri)
+    local key = trim(App.Config.gemini_api_key)
+    if key == "" then return false, "Gemini API key is required." end
+
+    local model = trim(App.Config.movie_model)
+    if model == "" then return false, "Movie model is required." end
+
+    -- Native Veo extension: pass the video URI directly; resolution locked to 720p
+    local instance_parts = {'"prompt":"' .. json_escape(prompt) .. '"'}
+    instance_parts[#instance_parts + 1] = '"video":{"uri":"' .. json_escape(video_uri) .. '"}'
+
+    local params_parts = {'"resolution":"720p"'}
+
+    local payload = "{"
+        .. '"instances":[{' .. table.concat(instance_parts, ",") .. '}],'
+        .. '"parameters":{' .. table.concat(params_parts, ",") .. '}'
+        .. "}"
+
+    local ok, op_name, body_or_err = start_veo_operation(payload)
+    if not ok then
+        return false, "Veo extension failed: " .. tostring(body_or_err)
+    end
+
+    set_movie_status("Movie extension started. Polling...")
+    local ok_poll, uri_or_err = poll_veo_operation(op_name)
+    if not ok_poll then
+        return false, tostring(uri_or_err)
+    end
+
+    local new_uri = uri_or_err
+    App.State.last_movie_uri = new_uri
+
+    local out_mp4 = build_output_path("movie", "mp4")
+    local ok_dl = download_file(new_uri, {"x-goog-api-key: " .. key}, out_mp4)
+    if not ok_dl then
+        return false, "Extension video URI returned but download failed."
+    end
+    if not file_exists(out_mp4) then
+        return false, "Extension download reported success but file missing."
+    end
+
+    local sidecar = write_generation_sidecar(out_mp4, {
+        provider = "gemini",
+        model = model,
+        kind = "movie",
+        ref_mode = "extend",
+        prompt = prompt,
+        aspect_ratio = App.Config.movie_aspect_ratio,
+        size_or_resolution = "720p",
+        video_uri = new_uri
+    })
+    add_history("video_gen", out_mp4, sidecar)
+
+    return true, out_mp4
+end
+
 local function generate_movie_gemini(prompt, refs)
     local key = trim(App.Config.gemini_api_key)
     if key == "" then return false, "Gemini API key is required." end
@@ -2689,8 +2790,11 @@ local function generate_movie_gemini(prompt, refs)
         return false, tostring(uri_or_err)
     end
 
+    local video_uri = uri_or_err
+    App.State.last_movie_uri = video_uri
+
     local out_mp4 = build_output_path("movie", "mp4")
-    local ok_dl = download_file(uri_or_err, {"x-goog-api-key: " .. key}, out_mp4)
+    local ok_dl = download_file(video_uri, {"x-goog-api-key: " .. key}, out_mp4)
     if not ok_dl then
         return false, "Video URI returned but download failed."
     end
@@ -2709,7 +2813,8 @@ local function generate_movie_gemini(prompt, refs)
         aspect_ratio = App.Config.movie_aspect_ratio,
         size_or_resolution = App.Config.movie_resolution,
         duration = App.Config.movie_duration,
-        refs = refs
+        refs = refs,
+        video_uri = video_uri
     })
     add_history("video_gen", out_mp4, sidecar)
 
@@ -2988,7 +3093,7 @@ local function load_settings_from_gallery(tab)
         refresh_model_combos()
         clear_all_refs("movie")
         for i, p in ipairs(meta.refs or {}) do
-            if i <= (App.State.movie_max_refs or 3) and file_exists(p) then
+            if i <= (App.State.movie_max_refs or 3) and file_exists(p) and not is_video_file(p) then
                 App.State.movie_refs[i] = p
             end
         end
@@ -3069,7 +3174,10 @@ local function use_selected_gallery_as_ref(tab)
         return false, "Selected file no longer exists."
     end
 
-    local idx = fill_ref_slot(tab, entry.path, {timeline = "Gallery", timecode = "", frame = ""})
+    local idx, err = fill_ref_slot(tab, entry.path, {timeline = "Gallery", timecode = "", frame = ""})
+    if not idx then
+        return false, err or "Cannot load this file as a reference."
+    end
     add_history("ref", entry.path)
     refresh_gallery_ui()
     refresh_slot_buttons()
@@ -3378,6 +3486,7 @@ local function build_ui()
                 ui:Button({ID = "movieClearBtn", Text = "Clear Slots"}),
                 ui:Button({ID = "movieGenerateBtn", Text = "Generate Movie"}),
                 ui:Button({ID = "movieKeepEditingBtn", Text = "Keep Editing"}),
+                ui:Button({ID = "movieExtendBtn", Text = "Extend Movie"}),
                 ui:Button({ID = "movieAddPoolBtn", Text = "Add Movie To Media Pool"}),
                 ui:Button({ID = "moviePlayBtn", Text = "Play Result"}),
                 ui:Button({ID = "movieCloseBtn", Text = "Close"})
@@ -3435,7 +3544,7 @@ local function build_ui()
             "imgGrabBtn", "imgClearBtn", "imgGenerateBtn", "imgKeepEditingBtn", "imgAddPoolBtn", "imgCloseBtn",
             "movieRefreshModelsBtn", "movieToken1Btn", "movieToken2Btn", "movieToken3Btn", "movieInlineTokenInsertBtn",
             "movieGalleryUseBtn", "movieGalleryDeleteBtn", "movieGalleryPasteBtn", "movieGalleryLoadBtn", "movieGalleryAddPoolBtn", "movieUndoRefBtn", "movieOpenResultBtn",
-            "movieGrabBtn", "movieClearBtn", "movieGenerateBtn", "movieKeepEditingBtn", "movieAddPoolBtn", "moviePlayBtn", "movieCloseBtn",
+            "movieGrabBtn", "movieClearBtn", "movieGenerateBtn", "movieKeepEditingBtn", "movieExtendBtn", "movieAddPoolBtn", "moviePlayBtn", "movieCloseBtn",
             "cfgGeminiTestBtn", "cfgSaveBtn", "cfgSaveDirBrowseBtn", "cfgPoolDirBrowseBtn", "cfgOpenReadmeBtn", "cfgCheckUpdatesBtn", "cfgGetApiKeyBtn"
         }
         for _, id in ipairs(button_ids) do
@@ -4232,6 +4341,44 @@ local function build_ui()
     function win.On.movieKeepEditingBtn.Clicked()
         local ok, msg = keep_editing("movie")
         set_movie_status(msg)
+    end
+
+    function win.On.movieExtendBtn.Clicked()
+        local uri = App.State.last_movie_uri
+        if not uri or uri == "" then
+            set_movie_status("No extendable movie result. Generate a movie first (URI required for extension).")
+            return
+        end
+
+        apply_config_from_controls()
+        App.Config.movie_model = display_to_model(combo_current_text(items.movieModelCombo))
+        save_settings()
+
+        local prompt = trim(items.moviePromptEdit.PlainText or items.moviePromptEdit.Text or "")
+        if prompt == "" then
+            set_movie_status("Prompt is required for extension.")
+            return
+        end
+
+        App.State.movie_generating = true
+        App.State.last_movie_path = nil
+        refresh_slot_buttons()
+        set_movie_status("Starting movie extension...")
+        pcall(function() App.Core.disp:StepLoop() end)
+        pcall(function() App.Core.ui:StepLoop() end)
+
+        local ok, result = generate_movie_extension_gemini(prompt, uri)
+        App.State.movie_generating = false
+        if ok then
+            App.State.last_movie_path = result
+            refresh_gallery_ui()
+            refresh_slot_buttons()
+            set_movie_status("Extension complete:\n" .. tostring(result))
+        else
+            local hint = parse_veo_blocking_hint(result)
+            set_movie_status("Extension failed:\n" .. tostring(hint or result))
+            refresh_slot_buttons()
+        end
     end
 
     function win.On.imgAddPoolBtn.Clicked()
