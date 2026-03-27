@@ -2423,6 +2423,12 @@ local function generate_image_gemini(prompt, refs)
 
     local payload = "{"
         .. '"contents":[{"role":"user","parts":[' .. table.concat(parts, ",") .. ']}],'
+        .. '"safetySettings":['
+        .. '{"category":"HARM_CATEGORY_HARASSMENT","threshold":"BLOCK_NONE"},'
+        .. '{"category":"HARM_CATEGORY_HATE_SPEECH","threshold":"BLOCK_NONE"},'
+        .. '{"category":"HARM_CATEGORY_SEXUALLY_EXPLICIT","threshold":"BLOCK_NONE"},'
+        .. '{"category":"HARM_CATEGORY_DANGEROUS_CONTENT","threshold":"BLOCK_NONE"}'
+        .. '],'
         .. '"generationConfig":{'
         .. '"responseModalities":["TEXT","IMAGE"],'
         .. '"imageConfig":{'
@@ -3092,15 +3098,30 @@ local function load_settings_from_gallery(tab)
 
         refresh_model_combos()
         clear_all_refs("movie")
+        local mov_refs_loaded = 0
+        log("[LoadSettings] movie sidecar has " .. tostring(#(meta.refs or {})) .. " ref(s). movie_max_refs=" .. tostring(App.State.movie_max_refs))
         for i, p in ipairs(meta.refs or {}) do
-            if i <= (App.State.movie_max_refs or 3) and file_exists(p) and not is_video_file(p) then
-                App.State.movie_refs[i] = p
+            log("[LoadSettings] ref[" .. i .. "] = " .. tostring(p) .. " | exists=" .. tostring(file_exists(p)))
+            if i <= (App.State.movie_max_refs or 3) and not is_video_file(p) then
+                local resolved = p
+                if not file_exists(resolved) then
+                    local alt = App.Config.refs_dir .. basename(p)
+                    log("[LoadSettings] fallback path: " .. tostring(alt) .. " | exists=" .. tostring(file_exists(alt)))
+                    if file_exists(alt) then resolved = alt end
+                end
+                if file_exists(resolved) then
+                    App.State.movie_refs[i] = resolved
+                    mov_refs_loaded = mov_refs_loaded + 1
+                end
             end
         end
 
         refresh_slot_buttons()
         refresh_gallery_ui()
-        return true, "Loaded movie settings from metadata: " .. basename(entry.path)
+        local mov_ref_note = (#(meta.refs or {}) > 0)
+            and (" | " .. tostring(mov_refs_loaded) .. "/" .. tostring(#(meta.refs or {})) .. " refs restored")
+            or ""
+        return true, "Loaded movie settings from metadata: " .. basename(entry.path) .. mov_ref_note
     end
 
     if meta.model and meta.model ~= "" then App.Config.image_model = meta.model end
@@ -3114,15 +3135,27 @@ local function load_settings_from_gallery(tab)
 
     refresh_model_combos()
     clear_all_refs("image")
+    local img_refs_loaded = 0
     for i, p in ipairs(meta.refs or {}) do
-        if i <= (App.State.image_max_refs or 8) and file_exists(p) then
-            App.State.image_refs[i] = p
+        if i <= (App.State.image_max_refs or 8) then
+            local resolved = p
+            if not file_exists(resolved) then
+                local alt = App.Config.refs_dir .. basename(p)
+                if file_exists(alt) then resolved = alt end
+            end
+            if file_exists(resolved) then
+                App.State.image_refs[i] = resolved
+                img_refs_loaded = img_refs_loaded + 1
+            end
         end
     end
 
     refresh_slot_buttons()
     refresh_gallery_ui()
-    return true, "Loaded image settings from metadata: " .. basename(entry.path)
+    local img_ref_note = (#(meta.refs or {}) > 0)
+        and (" | " .. tostring(img_refs_loaded) .. "/" .. tostring(#(meta.refs or {})) .. " refs restored")
+        or ""
+    return true, "Loaded image settings from metadata: " .. basename(entry.path) .. img_ref_note
 end
 
 local function keep_editing(tab)
