@@ -16,7 +16,7 @@ local LEGACY_OUTPUT_DIR = "/tmp/davinci-image-ai-clean/output/"
 
 App.Config = {
     script_name = "Black Magic Banana",
-    script_version = "0.4.18-bugfixes",
+    script_version = "0.5.0",
     refs_dir = DEFAULT_REFS_DIR,
     temp_dir = DEFAULT_TEMP_DIR,
     output_dir = DEFAULT_OUTPUT_DIR,
@@ -86,6 +86,7 @@ App.State = {
     movie_gallery_page_size = 4,
     gallery_button_count = 12,
     gallery_scroll_sync = false,
+    gallery_browser_open = false,
     image_wheel_accum = 0,
     movie_wheel_accum = 0,
 
@@ -490,13 +491,70 @@ local function encode_keyval_lines(tbl, keys)
     return table.concat(lines, "\n") .. "\n"
 end
 
+-- ---------------------------------------------------------------------------
+-- macOS Keychain helpers
+-- The API key is stored in the user's login Keychain rather than plaintext.
+-- Falls back gracefully if the `security` tool is unavailable (non-macOS).
+-- ---------------------------------------------------------------------------
+local KEYCHAIN_SERVICE = "BlackMagicBanana"
+local KEYCHAIN_ACCOUNT = os.getenv("USER") or "user"
+
+local function keychain_read_key()
+    if not has_cmd("security") then return nil end
+    local tmp = unique_path(App.Config.temp_dir or "/tmp", "kc_read", "txt")
+    local cmd = string.format(
+        "security find-generic-password -a %s -s %s -w > %s 2>/dev/null",
+        shell_quote(KEYCHAIN_ACCOUNT),
+        shell_quote(KEYCHAIN_SERVICE),
+        shell_quote(tmp)
+    )
+    run_shell_ok(cmd)
+    local val = read_file(tmp, "rb")
+    pcall(function() os.remove(tmp) end)
+    if val then val = trim(val) end
+    if val and val ~= "" then return val end
+    return nil
+end
+
+local function keychain_write_key(key_value)
+    if not has_cmd("security") then return false end
+    key_value = tostring(key_value or "")
+    -- Delete any existing entry first so the add never fails.
+    run_shell_ok(string.format(
+        "security delete-generic-password -a %s -s %s > /dev/null 2>&1",
+        shell_quote(KEYCHAIN_ACCOUNT),
+        shell_quote(KEYCHAIN_SERVICE)
+    ))
+    if key_value == "" then return true end -- deletion was the goal
+    local ok = run_shell_ok(string.format(
+        "security add-generic-password -U -a %s -s %s -w %s > /dev/null 2>&1",
+        shell_quote(KEYCHAIN_ACCOUNT),
+        shell_quote(KEYCHAIN_SERVICE),
+        shell_quote(key_value)
+    ))
+    return ok
+end
+
+local function keychain_delete_key()
+    if not has_cmd("security") then return end
+    run_shell_ok(string.format(
+        "security delete-generic-password -a %s -s %s > /dev/null 2>&1",
+        shell_quote(KEYCHAIN_ACCOUNT),
+        shell_quote(KEYCHAIN_SERVICE)
+    ))
+end
+
 local function load_settings()
     local txt = read_file(App.Paths.settings_path, "rb")
     if txt and txt ~= "" then
         local kv = parse_keyval_lines(txt)
 
         App.Config.gemini_api_url = kv.gemini_api_url or App.Config.gemini_api_url
-        App.Config.gemini_api_key = kv.gemini_api_key or App.Config.gemini_api_key
+        -- Legacy: migrate plaintext key from conf file into Keychain on first load.
+        if kv.gemini_api_key and kv.gemini_api_key ~= "" then
+            keychain_write_key(kv.gemini_api_key)
+            log("Migrated API key from settings file to macOS Keychain.")
+        end
 
         App.Config.output_dir = kv.output_dir or App.Config.output_dir
         App.Config.media_pool_dir = kv.media_pool_dir or App.Config.media_pool_dir
@@ -505,20 +563,31 @@ local function load_settings()
         App.Config.image_aspect_ratio = kv.image_aspect_ratio or App.Config.image_aspect_ratio
         App.Config.image_size = kv.image_size or App.Config.image_size
 
-    App.Config.movie_model = kv.movie_model or App.Config.movie_model
-    App.Config.movie_ref_mode = kv.movie_ref_mode or App.Config.movie_ref_mode
-    App.Config.movie_aspect_ratio = kv.movie_aspect_ratio or App.Config.movie_aspect_ratio
-    App.Config.movie_resolution = kv.movie_resolution or App.Config.movie_resolution
-    App.Config.movie_duration = kv.movie_duration or App.Config.movie_duration
+        App.Config.movie_model = kv.movie_model or App.Config.movie_model
+        App.Config.movie_ref_mode = kv.movie_ref_mode or App.Config.movie_ref_mode
+        App.Config.movie_aspect_ratio = kv.movie_aspect_ratio or App.Config.movie_aspect_ratio
+        App.Config.movie_resolution = kv.movie_resolution or App.Config.movie_resolution
+        App.Config.movie_duration = kv.movie_duration or App.Config.movie_duration
         App.Config.movie_negative_prompt = kv.movie_negative_prompt or App.Config.movie_negative_prompt
     end
+
+    -- Always load the API key from Keychain (preferred), then fall back to
+    -- the DAVINCI_IMAGE_AI_API_KEY env var, then keep whatever is already set.
+    local kc_key = keychain_read_key()
+    if kc_key and kc_key ~= "" then
+        App.Config.gemini_api_key = kc_key
+    end
+
     apply_storage_defaults()
 end
 
 local function save_settings()
     apply_storage_defaults()
+    -- Persist the API key to Keychain, not to the conf file.
+    keychain_write_key(App.Config.gemini_api_key)
     local keys = {
-        "gemini_api_url", "gemini_api_key",
+        "gemini_api_url",
+        -- NOTE: gemini_api_key intentionally omitted — stored in Keychain.
         "output_dir", "media_pool_dir",
         "image_model", "image_aspect_ratio", "image_size",
         "movie_model", "movie_ref_mode", "movie_aspect_ratio", "movie_resolution", "movie_duration", "movie_negative_prompt"
@@ -708,10 +777,32 @@ local function gallery_filter_kind(label)
     return "refs"
 end
 
-local function parse_http_error_message(body)
+local HTTP_STATUS_HINTS = {
+    [400] = "Bad request — check your prompt or model settings.",
+    [401] = "Unauthorised — your API key is invalid or missing.",
+    [403] = "Forbidden — your API key does not have access to this model or endpoint.",
+    [404] = "Not found — the model or API endpoint does not exist. Check your API URL.",
+    [429] = "Rate limit exceeded — you have hit your quota. Wait a moment and try again.",
+    [500] = "Gemini server error — the API returned an internal error. Try again shortly.",
+    [503] = "Gemini service unavailable — the API is temporarily down. Try again later.",
+}
+
+local function parse_http_error_message(body, status)
+    -- Try to extract the developer message from the JSON body first.
     local msg = body:match('"message"%s*:%s*"([^"]+)"')
-    if msg and msg ~= "" then
+    if msg and trim(msg) ~= "" then
+        -- Append a plain-English hint when we have one, unless the API message
+        -- already explains the situation clearly.
+        local hint = status and HTTP_STATUS_HINTS[tonumber(status)]
+        if hint and not msg:lower():find("quota") and not msg:lower():find("key") then
+            return msg .. "\nHint: " .. hint
+        end
         return msg
+    end
+    -- Fall back to a plain-English hint if we at least know the status code.
+    if status then
+        local hint = HTTP_STATUS_HINTS[tonumber(status)]
+        if hint then return hint end
     end
     return trim(body)
 end
@@ -2089,9 +2180,9 @@ local function test_gemini_key()
     if status >= 200 and status < 300 then
         return true, "Gemini key test passed."
     end
-    local msg = parse_http_error_message(body)
+    local msg = parse_http_error_message(body, status)
     if trim(msg) == "" then msg = trim(err) end
-    return false, "Gemini key test failed: HTTP " .. tostring(status) .. " " .. msg
+    return false, "Gemini key test failed: HTTP " .. tostring(status) .. "\n" .. msg
 end
 
 local function fetch_gemini_models()
@@ -2102,7 +2193,7 @@ local function fetch_gemini_models()
     local req = trim(App.Config.gemini_api_url) .. "/models?key=" .. urlencode(key)
     local status, body, err = curl_get(req, nil, 90)
     if status < 200 or status >= 300 then
-        local msg = parse_http_error_message(body)
+        local msg = parse_http_error_message(body, status)
         if trim(msg) == "" then msg = trim(err) end
         return false, "HTTP " .. tostring(status) .. ". " .. msg
     end
@@ -2445,10 +2536,10 @@ local function generate_image_gemini(prompt, refs)
     log("[cURL stats] " .. tostring(status) .. " size=" .. tostring(#(body or "")))
 
     if not ok_req then
-        return false, "HTTP 000. stderr: " .. tostring(err)
+        return false, "Network error — could not reach the Gemini API. Check your internet connection.\nDetail: " .. tostring(err)
     end
     if status < 200 or status >= 300 then
-        return false, "HTTP " .. tostring(status) .. ". " .. parse_http_error_message(body)
+        return false, "HTTP " .. tostring(status) .. ". " .. parse_http_error_message(body, status)
     end
 
     local mime, data = parse_image_from_response(body)
@@ -2588,14 +2679,14 @@ local function start_veo_operation(payload)
     log("[cURL stats] " .. tostring(status) .. " size=" .. tostring(#(body or "")))
 
     if not ok_req then
-        return false, nil, "HTTP 000. stderr: " .. tostring(err)
+        return false, nil, "Network error — could not reach the Veo API. Check your internet connection.\nDetail: " .. tostring(err)
     end
     if status < 200 or status >= 300 then
         pcall(function()
             mkdir_p(App.Config.debug_dir)
             write_file(App.Config.debug_dir .. "veo_start_last.json", body or "", "wb")
         end)
-        return false, nil, "HTTP " .. tostring(status) .. ". " .. parse_http_error_message(body)
+        return false, nil, "HTTP " .. tostring(status) .. ". " .. parse_http_error_message(body, status)
     end
 
     local op = body:match('"name"%s*:%s*"([^"]+)"')
@@ -2613,7 +2704,7 @@ local function poll_veo_operation(op_name)
     while os.difftime(os.time(), start_ts) < App.Config.max_poll_seconds do
         local status, body, err = curl_get(poll_url, nil, 90)
         if status < 200 or status >= 300 then
-            return false, "Poll failed: HTTP " .. tostring(status) .. ". " .. parse_http_error_message(body ~= "" and body or err)
+            return false, "Poll failed: HTTP " .. tostring(status) .. ". " .. parse_http_error_message(body ~= "" and body or err, status)
         end
 
         pcall(function()
@@ -2833,17 +2924,14 @@ local function refresh_gallery_buttons(tab)
     update_gallery_layout(tab)
 
     local list = (tab == "movie") and App.State.movie_gallery_list or App.State.image_gallery_list
-    local scroll = items[(tab == "movie") and "movieGalleryScroll" or "imgGalleryScroll"]
     local pos_label = items[(tab == "movie") and "movieGalleryScrollPosLabel" or "imgGalleryScrollPosLabel"]
+    local up_btn   = items[(tab == "movie") and "movieGalleryScrollUp" or "imgGalleryScrollUp"]
+    local dn_btn   = items[(tab == "movie") and "movieGalleryScrollDn" or "imgGalleryScrollDn"]
     local sel = (tab == "movie") and App.State.movie_gallery_index or App.State.image_gallery_index
     local offset = (tab == "movie") and App.State.movie_gallery_offset or App.State.image_gallery_offset
     local page_size = (tab == "movie") and (App.State.movie_gallery_page_size or 4) or (App.State.image_gallery_page_size or 4)
     local button_count = App.State.gallery_button_count or 12
-    if scroll then
-        set_scroll_macos_style(scroll)
-        pcall(function() scroll.MinimumSize = {16, 0} end)
-        pcall(function() scroll.MaximumSize = {20, 16777215} end)
-    end
+
     if #list == 0 then
         local prefix = (tab == "movie") and "movieGalleryBtn" or "imgGalleryBtn"
         for i = 1, button_count do
@@ -2862,20 +2950,12 @@ local function refresh_gallery_buttons(tab)
             App.State.image_gallery_index = 0
             App.State.image_gallery_offset = 1
         end
-        if scroll then
-            App.State.gallery_scroll_sync = true
-            pcall(function() scroll.Minimum = 1 end)
-            pcall(function() scroll.Maximum = 1 end)
-            pcall(function() scroll.PageStep = 1 end)
-            pcall(function() scroll.Value = 1 end)
-            pcall(function() scroll.Enabled = false end)
-            App.State.gallery_scroll_sync = false
-        end
-        if pos_label then
-            pcall(function() pos_label.Text = "0/0" end)
-        end
+        if up_btn then pcall(function() up_btn.Enabled = false end) end
+        if dn_btn then pcall(function() dn_btn.Enabled = false end) end
+        if pos_label then pcall(function() pos_label.Text = "0/0" end) end
         return
     end
+
     local max_offset = math.max(1, (#list - page_size) + 1)
     if offset < 1 then offset = 1 end
     if offset > max_offset then offset = max_offset end
@@ -2884,6 +2964,7 @@ local function refresh_gallery_buttons(tab)
     else
         App.State.image_gallery_offset = offset
     end
+
     local start_idx = offset
     local prefix = (tab == "movie") and "movieGalleryBtn" or "imgGalleryBtn"
     for i = 1, button_count do
@@ -2913,16 +2994,9 @@ local function refresh_gallery_buttons(tab)
         end
     end
 
-    if scroll then
-        App.State.gallery_scroll_sync = true
-        pcall(function() scroll.Minimum = 1 end)
-        pcall(function() scroll.Maximum = max_offset end)
-        pcall(function() scroll.PageStep = math.max(1, page_size - 1) end)
-        pcall(function() scroll.SingleStep = 1 end)
-        pcall(function() scroll.Enabled = max_offset > 1 end)
-        pcall(function() if tonumber(scroll.Value) ~= offset then scroll.Value = offset end end)
-        App.State.gallery_scroll_sync = false
-    end
+    -- ▲/▼ step buttons: enabled only when there is room to scroll
+    if up_btn then pcall(function() up_btn.Enabled = offset > 1 end) end
+    if dn_btn then pcall(function() dn_btn.Enabled = offset < max_offset end) end
     if pos_label then
         local visible_end = math.min(#list, offset + page_size - 1)
         pcall(function() pos_label.Text = tostring(offset) .. "-" .. tostring(visible_end) .. "/" .. tostring(#list) end)
@@ -3280,6 +3354,445 @@ local function parse_veo_blocking_hint(msg)
     return nil
 end
 
+-- Generates a fixed 16:9 JPEG thumbnail for the gallery browser.
+-- Unique per-slot key_pfx avoids preview-cache aliasing.
+local function make_browser_preview(path, key_pfx)
+    if not path or not file_exists(path) then return nil end
+    local W, H = 480, 270  -- 16:9
+    local key  = (key_pfx or "galbr") .. "|16x9|" .. path
+    local cached = App.State.preview_cache[key]
+    if cached and file_exists(cached) then return cached end
+
+    local out = unique_path(App.Config.temp_dir, key_pfx or "galbr", "jpg")
+    local ok  = false
+
+    if is_video_file(path) then
+        if has_cmd("ffmpeg") then
+            -- Scale to fill 16:9, then pad if needed
+            local vf = "scale=" .. W .. ":" .. H .. ":force_original_aspect_ratio=decrease,"
+                    .. "pad=" .. W .. ":" .. H .. ":(ow-iw)/2:(oh-ih)/2:black"
+            local cmd = "ffmpeg -y -ss 0.5 -i " .. shell_quote(path)
+                     .. " -frames:v 1 -vf " .. shell_quote(vf)
+                     .. " " .. shell_quote(out) .. " >/dev/null 2>&1"
+            ok = run_shell_ok(cmd) and file_exists(out)
+        end
+    else
+        -- sips -z forces exact pixel dimensions; slight stretch is fine for thumbnails.
+        local src = ensure_png(path) or path
+        local cmd = "sips -z " .. H .. " " .. W .. " -s format jpeg "
+                 .. shell_quote(src) .. " --out " .. shell_quote(out)
+                 .. " >/dev/null 2>&1"
+        ok = run_shell_ok(cmd) and file_exists(out)
+    end
+
+    if ok and file_exists(out) then
+        App.State.preview_cache[key] = out
+        return out
+    end
+    return nil
+end
+
+
+-- Gallery Browser Window
+-- Opens a full-size resizable window with a 5×4 thumbnail grid, paged
+-- navigation, and action buttons including Reveal in Finder.
+-- Uses a nested disp:RunLoop() so the main window is suspended while open.
+-- ---------------------------------------------------------------------------
+local function open_gallery_browser(tab)
+    if App.State.gallery_browser_open then return end
+    App.State.gallery_browser_open = true
+
+    local ui   = App.Core.ui
+    local disp = App.Core.disp
+    if not ui or not disp then
+        App.State.gallery_browser_open = false
+        return
+    end
+
+    local COLS     = 3
+    local PER_PAGE = 15  -- 3 × 5
+    local TOTAL_BTNS = PER_PAGE
+
+    local bstate = {
+        list    = {},
+        page    = 1,
+        sel_abs = 0,
+        tab     = tab,
+    }
+
+    local function rebuild_list(filter_text)
+        local kind = gallery_filter_kind(filter_text or "")
+        bstate.list    = get_project_history(kind)
+        bstate.page    = 1
+        bstate.sel_abs = 0
+    end
+
+    -- Sync starting filter from main window
+    local items_main     = App.State.items
+    local initial_filter = ""
+    if items_main then
+        local cid = (tab == "movie") and "movieGalleryFilterCombo" or "imgGalleryFilterCombo"
+        initial_filter = combo_current_text(items_main[cid]) or ""
+    end
+    rebuild_list(initial_filter)
+
+    -- Sync starting selection
+    local main_sel = (tab == "movie") and App.State.movie_gallery_index or App.State.image_gallery_index
+    if main_sel and main_sel >= 1 and main_sel <= #bstate.list then
+        bstate.sel_abs = main_sel
+        bstate.page    = math.ceil(main_sel / PER_PAGE)
+    end
+
+    local filter_options = {"Recent References", "Recent Images", "Recent Videos", "All Recent"}
+    local btn_style_base = "QPushButton{border-radius:0px;border:1px solid #5A607A;background:#1A1F2C;color:#9AA4C2;padding:2px;}QPushButton:hover{background:#252A3A;}QPushButton:disabled{color:#3A3F52;}"
+    local title_str = (tab == "movie") and "Movie Gallery Browser" or "Image Gallery Browser"
+
+    local bwin = disp:AddWindow({
+        ID = "galBrowseWin",
+        WindowTitle = title_str,
+        WindowFlags = { Window = true }
+    },
+    ui:VGroup({ID = "galBrowseRoot", Spacing = 6,
+        -- Top bar
+        ui:HGroup({Weight = 0, Spacing = 8,
+            ui:Label({Text = "Filter:", Weight = 0}),
+            ui:ComboBox({ID = "galBrowseFilterCombo", Weight = 1}),
+            ui:Label({ID = "galBrowsePosLabel", Text = "Loading…", Weight = 1}),
+            ui:Button({ID = "galBrowsePrevBtn", Text = "◀ Prev", Weight = 0}),
+            ui:Button({ID = "galBrowseNextBtn", Text = "Next ▶", Weight = 0})
+        }),
+        -- Thumbnail grid: 5 rows × 3 columns
+        ui:HGroup({Weight = 1, Spacing = 4,
+            ui:Button({ID = "galBrowseBtn1",  Text = "", Weight = 1}),
+            ui:Button({ID = "galBrowseBtn2",  Text = "", Weight = 1}),
+            ui:Button({ID = "galBrowseBtn3",  Text = "", Weight = 1})
+        }),
+        ui:HGroup({Weight = 1, Spacing = 4,
+            ui:Button({ID = "galBrowseBtn4",  Text = "", Weight = 1}),
+            ui:Button({ID = "galBrowseBtn5",  Text = "", Weight = 1}),
+            ui:Button({ID = "galBrowseBtn6",  Text = "", Weight = 1})
+        }),
+        ui:HGroup({Weight = 1, Spacing = 4,
+            ui:Button({ID = "galBrowseBtn7",  Text = "", Weight = 1}),
+            ui:Button({ID = "galBrowseBtn8",  Text = "", Weight = 1}),
+            ui:Button({ID = "galBrowseBtn9",  Text = "", Weight = 1})
+        }),
+        ui:HGroup({Weight = 1, Spacing = 4,
+            ui:Button({ID = "galBrowseBtn10", Text = "", Weight = 1}),
+            ui:Button({ID = "galBrowseBtn11", Text = "", Weight = 1}),
+            ui:Button({ID = "galBrowseBtn12", Text = "", Weight = 1})
+        }),
+        ui:HGroup({Weight = 1, Spacing = 4,
+            ui:Button({ID = "galBrowseBtn13", Text = "", Weight = 1}),
+            ui:Button({ID = "galBrowseBtn14", Text = "", Weight = 1}),
+            ui:Button({ID = "galBrowseBtn15", Text = "", Weight = 1})
+        }),
+        -- Action bar
+        ui:HGroup({Weight = 0, Spacing = 4,
+            ui:Button({ID = "galBrowseUseBtn",    Text = "Use as Ref"}),
+            ui:Button({ID = "galBrowseLoadBtn",   Text = "Load Settings"}),
+            ui:Button({ID = "galBrowseOpenBtn",   Text = "Open"}),
+            ui:Button({ID = "galBrowseFindBtn",   Text = "Reveal in Finder"}),
+            ui:Button({ID = "galBrowsePoolBtn",   Text = "Add to Pool"}),
+            ui:Button({ID = "galBrowseDeleteBtn", Text = "Delete"}),
+            ui:Button({ID = "galBrowseCloseBtn",  Text = "Close"})
+        }),
+        ui:Label({ID = "galBrowseStatusLabel", Text = "", Weight = 0})
+    }))
+
+    if not bwin then
+        App.State.gallery_browser_open = false
+        return
+    end
+
+    local bitems = bwin:GetItems()
+    -- Constrain each thumbnail button to a fixed 16:9 height so the grid
+    -- always fits on screen regardless of image aspect ratio.
+    local BTN_H = 160  -- px; 3 buttons at ~490px ea + spacing/UI chrome ≈760px total
+    for i = 1, TOTAL_BTNS do
+        local b = bitems["galBrowseBtn" .. i]
+        if b then
+            pcall(function() b.MaximumSize = {16777215, BTN_H} end)
+            pcall(function() b.MinimumSize = {0, BTN_H - 20}   end)
+        end
+    end
+    pcall(function() bwin.Geometry = {80, 40, 1100, 840} end)
+
+    -- Populate filter combo
+    combo_set_items(bitems.galBrowseFilterCombo, filter_options,
+        initial_filter ~= "" and initial_filter or filter_options[1])
+
+    local function set_browser_status(msg)
+        pcall(function()
+            if bitems.galBrowseStatusLabel then
+                bitems.galBrowseStatusLabel.Text = tostring(msg or "")
+            end
+        end)
+    end
+
+    local function refresh_browser()
+        local total    = #bstate.list
+        local max_page = math.max(1, math.ceil(total / PER_PAGE))
+        if bstate.page < 1       then bstate.page = 1        end
+        if bstate.page > max_page then bstate.page = max_page end
+
+        local start_abs = (bstate.page - 1) * PER_PAGE + 1
+        local end_abs   = math.min(total, start_abs + PER_PAGE - 1)
+
+        if total == 0 then
+            pcall(function() bitems.galBrowsePosLabel.Text = "No items" end)
+        else
+            pcall(function()
+                bitems.galBrowsePosLabel.Text =
+                    "Items " .. tostring(start_abs) .. "\xe2\x80\x93" .. tostring(end_abs)
+                    .. " of " .. tostring(total)
+            end)
+        end
+
+        pcall(function() bitems.galBrowsePrevBtn.Enabled = bstate.page > 1        end)
+        pcall(function() bitems.galBrowseNextBtn.Enabled = bstate.page < max_page end)
+
+        for slot = 1, TOTAL_BTNS do
+            local abs_idx = start_abs + slot - 1
+            local btn     = bitems["galBrowseBtn" .. tostring(slot)]
+            if btn then
+                local e = bstate.list[abs_idx]
+                if e and e.path and file_exists(e.path) then
+                    -- Generate a fixed 16:9 thumbnail (480×270) for consistent row heights.
+                    local key_pfx    = "galbr" .. tostring(slot)
+                    local preview_path = make_browser_preview(e.path, key_pfx)
+                    local icon_set   = false
+                    if preview_path and App.Core.ui then
+                        local ok, icon = pcall(function()
+                            return App.Core.ui:Icon({File = preview_path})
+                        end)
+                        if ok and icon then
+                            pcall(function()
+                                btn.Icon = icon
+                                btn.Text = ""
+                                btn.ToolTip = basename(e.path)
+                            end)
+                            icon_set = true
+                        end
+                    end
+                    if not icon_set then
+                        btn.Text = tostring(abs_idx)
+                        btn.ToolTip = basename(e.path)
+                        clear_button_icon(btn)
+                    end
+                    pcall(function() btn.Enabled = true end)
+                    local border = (abs_idx == bstate.sel_abs)
+                        and "border: 3px solid #7B9FDB;"
+                        or  "border: 1px solid #5A607A;"
+                    set_button_square_style(btn, border, 0)
+                else
+                    set_button_empty_state(btn, "", true)
+                    pcall(function() btn.Enabled = false end)
+                    pcall(function() btn.ToolTip = "" end)
+                end
+            end
+        end
+
+        local has_sel = bstate.sel_abs >= 1
+            and bstate.sel_abs <= total
+            and file_exists(((bstate.list[bstate.sel_abs] or {}).path) or "")
+        for _, aid in ipairs({"galBrowseUseBtn","galBrowseLoadBtn","galBrowseOpenBtn",
+                              "galBrowseFindBtn","galBrowsePoolBtn","galBrowseDeleteBtn"}) do
+            pcall(function() if bitems[aid] then bitems[aid].Enabled = has_sel end end)
+        end
+    end
+
+    -- Show first so widgets are realized; THEN populate icons.
+    -- Fusion's UIManager silently drops Icon assignments on widgets that
+    -- haven't been painted yet, which caused blank buttons on first open.
+    bwin:Show()
+    pcall(function() bwin.Geometry = {80, 40, 1100, 840} end)
+    refresh_browser()
+
+    -- Filter
+    bwin.On.galBrowseFilterCombo.CurrentIndexChanged = function()
+        rebuild_list(combo_current_text(bitems.galBrowseFilterCombo))
+        refresh_browser()
+    end
+
+    -- Paging
+    bwin.On.galBrowsePrevBtn.Clicked = function()
+        bstate.page = bstate.page - 1
+        refresh_browser()
+    end
+    bwin.On.galBrowseNextBtn.Clicked = function()
+        bstate.page = bstate.page + 1
+        refresh_browser()
+    end
+
+    -- Thumbnail clicks (single = select, double = Use as Ref)
+    local last_click_abs = 0
+    local last_click_ms  = 0
+    for slot = 1, TOTAL_BTNS do
+        local s = slot
+        bwin.On["galBrowseBtn" .. tostring(s)].Clicked = function()
+            local abs_idx = (bstate.page - 1) * PER_PAGE + s
+            if abs_idx < 1 or abs_idx > #bstate.list then return end
+            local t = now_ms()
+            local is_dbl = (abs_idx == last_click_abs) and ((t - last_click_ms) < 500)
+            last_click_ms  = t
+            last_click_abs = abs_idx
+            bstate.sel_abs = abs_idx
+            refresh_browser()
+            local e = bstate.list[abs_idx]
+            set_browser_status("Selected: " .. basename((e or {}).path or ""))
+            if is_dbl and e and e.path and file_exists(e.path) then
+                -- Double-click: load into first empty ref slot
+                local max_r = (bstate.tab == "movie") and (App.State.movie_max_refs or 2)
+                              or (App.State.image_max_refs or 8)
+                local refs  = (bstate.tab == "movie") and App.State.movie_refs or App.State.image_refs
+                for i = 1, max_r do
+                    if not refs[i] or refs[i] == "" then
+                        refs[i] = e.path
+                        refresh_slot_buttons()
+                        set_browser_status("Loaded into slot " .. i .. " (double-click)")
+                        return
+                    end
+                end
+                set_browser_status("All ref slots are full.")
+            end
+        end
+    end
+
+    -- Helper: get current selected entry
+    local function sel_entry()
+        return bstate.list[bstate.sel_abs]
+    end
+
+    -- Use as Ref
+    bwin.On.galBrowseUseBtn.Clicked = function()
+        local e = sel_entry()
+        if not e or not e.path or not file_exists(e.path) then
+            set_browser_status("No item selected.")
+            return
+        end
+        local max_r = (bstate.tab == "movie") and (App.State.movie_max_refs or 2)
+                      or (App.State.image_max_refs or 8)
+        local refs  = (bstate.tab == "movie") and App.State.movie_refs or App.State.image_refs
+        for i = 1, max_r do
+            if not refs[i] or refs[i] == "" then
+                refs[i] = e.path
+                refresh_slot_buttons()
+                set_browser_status("Loaded into slot " .. i)
+                return
+            end
+        end
+        set_browser_status("All ref slots are full.")
+    end
+
+    -- Load Settings
+    bwin.On.galBrowseLoadBtn.Clicked = function()
+        local e = sel_entry()
+        if not e or not e.path then
+            set_browser_status("No item selected.")
+            return
+        end
+        if bstate.tab == "movie" then
+            App.State.movie_gallery_index = bstate.sel_abs
+        else
+            App.State.image_gallery_index = bstate.sel_abs
+        end
+        local ok, msg = load_settings_from_gallery(bstate.tab)
+        set_browser_status(msg)
+    end
+
+    -- Open
+    bwin.On.galBrowseOpenBtn.Clicked = function()
+        local e = sel_entry()
+        if not e or not e.path or not file_exists(e.path) then
+            set_browser_status("No item selected.")
+            return
+        end
+        local ok = open_file(e.path)
+        set_browser_status(ok and ("Opened: " .. basename(e.path)) or "Failed to open file.")
+    end
+
+    -- Reveal in Finder
+    bwin.On.galBrowseFindBtn.Clicked = function()
+        local e = sel_entry()
+        if not e or not e.path or not file_exists(e.path) then
+            set_browser_status("No item selected.")
+            return
+        end
+        local ok = reveal_in_finder(e.path)
+        set_browser_status(ok and ("Revealed: " .. basename(e.path)) or "Reveal in Finder failed.")
+    end
+
+    -- Add to Media Pool
+    bwin.On.galBrowsePoolBtn.Clicked = function()
+        local e = sel_entry()
+        if not e or not e.path or not file_exists(e.path) then
+            set_browser_status("No item selected.")
+            return
+        end
+        local ok, err, staged = stage_and_import(e.path)
+        set_browser_status(ok
+            and ("Added to Media Pool: " .. basename(staged or e.path))
+            or  ("Failed: " .. tostring(err)))
+    end
+
+    -- Delete
+    bwin.On.galBrowseDeleteBtn.Clicked = function()
+        local e = sel_entry()
+        if not e or not e.path then
+            set_browser_status("No item selected.")
+            return
+        end
+        local p  = e.path
+        local sp = sidecar_path_for(p)
+        if file_exists(p)  then os.remove(p)  end
+        if file_exists(sp) then os.remove(sp) end
+        delete_history_path(p)
+        bstate.sel_abs = 0
+        rebuild_list(combo_current_text(bitems.galBrowseFilterCombo))
+        refresh_browser()
+        refresh_gallery_ui()
+        set_browser_status("Deleted: " .. basename(p))
+    end
+
+    -- Close: sync selection back to main window
+    local function do_browser_close()
+        if bstate.sel_abs >= 1 and bstate.sel_abs <= #bstate.list then
+            if bstate.tab == "movie" then
+                App.State.movie_gallery_index = bstate.sel_abs
+                local ps = App.State.movie_gallery_page_size or 4
+                App.State.movie_gallery_offset = math.max(1, bstate.sel_abs - math.floor(ps / 2))
+            else
+                App.State.image_gallery_index = bstate.sel_abs
+                local ps = App.State.image_gallery_page_size or 4
+                App.State.image_gallery_offset = math.max(1, bstate.sel_abs - math.floor(ps / 2))
+            end
+            refresh_gallery_ui()
+        end
+        App.State.gallery_browser_open = false
+        disp:ExitLoop()
+    end
+
+    bwin.On.galBrowseCloseBtn.Clicked  = function() do_browser_close() end
+    bwin.On.galBrowseWin.Close         = function() do_browser_close() end
+
+    disp:RunLoop()
+    bwin:Hide()
+end
+
+-- Route new module locals through the App table so they don't add upvalues to
+-- build_ui() -- LuaJIT caps closures at 60 upvalues and build_ui is at that limit.
+App._galFn = {
+    browse = open_gallery_browser,
+    find   = function(tab)
+        local e = current_gallery_entry(tab)
+        if e and e.path and file_exists(e.path) then
+            return reveal_in_finder(e.path), "Revealed: " .. basename(e.path)
+        end
+        return false, "No gallery item selected."
+    end,
+}
+
 local function build_ui()
     if not App.Core.disp then
         return nil
@@ -3347,33 +3860,39 @@ local function build_ui()
 
             ui:HGroup({Weight = 1, Spacing = 6,
                 ui:VGroup({ID = "imgGalleryCol", Weight = 0.18, Spacing = 6,
-                    ui:Label({Text = "Gallery", Weight = 0}),
+                    ui:HGroup({Weight = 0, Spacing = 4,
+                        ui:Label({Text = "Gallery", Weight = 1}),
+                        ui:Button({ID = "imgGalleryBrowseBtn", Text = "Browse ↗", Weight = 0,
+                            StyleSheet = "QPushButton{border-radius:0px;border:1px solid #5A607A;background:#1A1F2C;color:#9AA4C2;padding:2px 6px;font-size:11px;}QPushButton:hover{background:#252A3A;}"})
+                    }),
                     ui:ComboBox({ID = "imgGalleryFilterCombo", Weight = 0}),
                     ui:HGroup({Weight = 1, Spacing = 4,
                         ui:VGroup({ID = "imgGalleryListGroup", Weight = 1, Spacing = 4,
-                            ui:Button({ID = "imgGalleryBtn1", Text = "1", Weight = 0}),
-                            ui:Button({ID = "imgGalleryBtn2", Text = "2", Weight = 0}),
-                            ui:Button({ID = "imgGalleryBtn3", Text = "3", Weight = 0}),
-                            ui:Button({ID = "imgGalleryBtn4", Text = "4", Weight = 0}),
-                            ui:Button({ID = "imgGalleryBtn5", Text = "5", Weight = 0}),
-                            ui:Button({ID = "imgGalleryBtn6", Text = "6", Weight = 0}),
-                            ui:Button({ID = "imgGalleryBtn7", Text = "7", Weight = 0}),
-                            ui:Button({ID = "imgGalleryBtn8", Text = "8", Weight = 0}),
-                            ui:Button({ID = "imgGalleryBtn9", Text = "9", Weight = 0}),
+                            ui:Button({ID = "imgGalleryBtn1",  Text = "1",  Weight = 0}),
+                            ui:Button({ID = "imgGalleryBtn2",  Text = "2",  Weight = 0}),
+                            ui:Button({ID = "imgGalleryBtn3",  Text = "3",  Weight = 0}),
+                            ui:Button({ID = "imgGalleryBtn4",  Text = "4",  Weight = 0}),
+                            ui:Button({ID = "imgGalleryBtn5",  Text = "5",  Weight = 0}),
+                            ui:Button({ID = "imgGalleryBtn6",  Text = "6",  Weight = 0}),
+                            ui:Button({ID = "imgGalleryBtn7",  Text = "7",  Weight = 0}),
+                            ui:Button({ID = "imgGalleryBtn8",  Text = "8",  Weight = 0}),
+                            ui:Button({ID = "imgGalleryBtn9",  Text = "9",  Weight = 0}),
                             ui:Button({ID = "imgGalleryBtn10", Text = "10", Weight = 0}),
                             ui:Button({ID = "imgGalleryBtn11", Text = "11", Weight = 0}),
                             ui:Button({ID = "imgGalleryBtn12", Text = "12", Weight = 0})
                         }),
                         ui:VGroup({Weight = 0, Spacing = 2,
-                            make_vscroll("imgGalleryScroll"),
-                            ui:Label({ID = "imgGalleryScrollPosLabel", Text = "0/0", Weight = 0})
+                            ui:Button({ID = "imgGalleryScrollUp", Text = "▲", Weight = 0}),
+                            ui:Label({ID = "imgGalleryScrollPosLabel", Text = "0/0", Weight = 1}),
+                            ui:Button({ID = "imgGalleryScrollDn", Text = "▼", Weight = 0})
                         })
                     }),
-                    ui:Button({ID = "imgGalleryUseBtn", Text = "Use Selected As Ref", Weight = 0}),
-                    ui:Button({ID = "imgGalleryDeleteBtn", Text = "Delete Selected", Weight = 0}),
-                    ui:Button({ID = "imgGalleryPasteBtn", Text = "Paste Ref", Weight = 0}),
-                    ui:Button({ID = "imgGalleryLoadBtn", Text = "Load Settings", Weight = 0}),
-                    ui:Button({ID = "imgGalleryAddPoolBtn", Text = "Add Selected To Pool", Weight = 0}),
+                    ui:Button({ID = "imgGalleryUseBtn",    Text = "Use as Ref",         Weight = 0}),
+                    ui:Button({ID = "imgGalleryDeleteBtn", Text = "Delete Selected",     Weight = 0}),
+                    ui:Button({ID = "imgGalleryFindBtn",   Text = "Reveal in Finder",    Weight = 0}),
+                    ui:Button({ID = "imgGalleryPasteBtn",  Text = "Paste Ref",           Weight = 0}),
+                    ui:Button({ID = "imgGalleryLoadBtn",   Text = "Load Settings",       Weight = 0}),
+                    ui:Button({ID = "imgGalleryAddPoolBtn",Text = "Add Selected To Pool",Weight = 0}),
                     ui:Button({ID = "imgUndoRefBtn", Text = "↩ Undo Clear", Weight = 0,
                         StyleSheet = "QPushButton{border-radius:0px;border:1px solid #5A607A;background:#1A1F2C;color:#9AA4C2;padding:2px 8px;}QPushButton:hover{background:#252A3A;}QPushButton:disabled{color:#3A3F52;}"})
                 }),
@@ -3454,33 +3973,39 @@ local function build_ui()
 
             ui:HGroup({Weight = 1, Spacing = 6,
                 ui:VGroup({ID = "movieGalleryCol", Weight = 0.18, Spacing = 6,
-                    ui:Label({Text = "Gallery", Weight = 0}),
+                    ui:HGroup({Weight = 0, Spacing = 4,
+                        ui:Label({Text = "Gallery", Weight = 1}),
+                        ui:Button({ID = "movieGalleryBrowseBtn", Text = "Browse ↗", Weight = 0,
+                            StyleSheet = "QPushButton{border-radius:0px;border:1px solid #5A607A;background:#1A1F2C;color:#9AA4C2;padding:2px 6px;font-size:11px;}QPushButton:hover{background:#252A3A;}"})
+                    }),
                     ui:ComboBox({ID = "movieGalleryFilterCombo", Weight = 0}),
                     ui:HGroup({Weight = 1, Spacing = 4,
                         ui:VGroup({ID = "movieGalleryListGroup", Weight = 1, Spacing = 4,
-                            ui:Button({ID = "movieGalleryBtn1", Text = "1", Weight = 0}),
-                            ui:Button({ID = "movieGalleryBtn2", Text = "2", Weight = 0}),
-                            ui:Button({ID = "movieGalleryBtn3", Text = "3", Weight = 0}),
-                            ui:Button({ID = "movieGalleryBtn4", Text = "4", Weight = 0}),
-                            ui:Button({ID = "movieGalleryBtn5", Text = "5", Weight = 0}),
-                            ui:Button({ID = "movieGalleryBtn6", Text = "6", Weight = 0}),
-                            ui:Button({ID = "movieGalleryBtn7", Text = "7", Weight = 0}),
-                            ui:Button({ID = "movieGalleryBtn8", Text = "8", Weight = 0}),
-                            ui:Button({ID = "movieGalleryBtn9", Text = "9", Weight = 0}),
+                            ui:Button({ID = "movieGalleryBtn1",  Text = "1",  Weight = 0}),
+                            ui:Button({ID = "movieGalleryBtn2",  Text = "2",  Weight = 0}),
+                            ui:Button({ID = "movieGalleryBtn3",  Text = "3",  Weight = 0}),
+                            ui:Button({ID = "movieGalleryBtn4",  Text = "4",  Weight = 0}),
+                            ui:Button({ID = "movieGalleryBtn5",  Text = "5",  Weight = 0}),
+                            ui:Button({ID = "movieGalleryBtn6",  Text = "6",  Weight = 0}),
+                            ui:Button({ID = "movieGalleryBtn7",  Text = "7",  Weight = 0}),
+                            ui:Button({ID = "movieGalleryBtn8",  Text = "8",  Weight = 0}),
+                            ui:Button({ID = "movieGalleryBtn9",  Text = "9",  Weight = 0}),
                             ui:Button({ID = "movieGalleryBtn10", Text = "10", Weight = 0}),
                             ui:Button({ID = "movieGalleryBtn11", Text = "11", Weight = 0}),
                             ui:Button({ID = "movieGalleryBtn12", Text = "12", Weight = 0})
                         }),
                         ui:VGroup({Weight = 0, Spacing = 2,
-                            make_vscroll("movieGalleryScroll"),
-                            ui:Label({ID = "movieGalleryScrollPosLabel", Text = "0/0", Weight = 0})
+                            ui:Button({ID = "movieGalleryScrollUp", Text = "▲", Weight = 0}),
+                            ui:Label({ID = "movieGalleryScrollPosLabel", Text = "0/0", Weight = 1}),
+                            ui:Button({ID = "movieGalleryScrollDn", Text = "▼", Weight = 0})
                         })
                     }),
-                    ui:Button({ID = "movieGalleryUseBtn", Text = "Use Selected As Ref", Weight = 0}),
-                    ui:Button({ID = "movieGalleryDeleteBtn", Text = "Delete Selected", Weight = 0}),
-                    ui:Button({ID = "movieGalleryPasteBtn", Text = "Paste Ref", Weight = 0}),
-                    ui:Button({ID = "movieGalleryLoadBtn", Text = "Load Settings", Weight = 0}),
-                    ui:Button({ID = "movieGalleryAddPoolBtn", Text = "Add Selected To Pool", Weight = 0}),
+                    ui:Button({ID = "movieGalleryUseBtn",    Text = "Use as Ref",         Weight = 0}),
+                    ui:Button({ID = "movieGalleryDeleteBtn", Text = "Delete Selected",     Weight = 0}),
+                    ui:Button({ID = "movieGalleryFindBtn",   Text = "Reveal in Finder",    Weight = 0}),
+                    ui:Button({ID = "movieGalleryPasteBtn",  Text = "Paste Ref",           Weight = 0}),
+                    ui:Button({ID = "movieGalleryLoadBtn",   Text = "Load Settings",       Weight = 0}),
+                    ui:Button({ID = "movieGalleryAddPoolBtn",Text = "Add Selected To Pool",Weight = 0}),
                     ui:Button({ID = "movieUndoRefBtn", Text = "↩ Undo Clear", Weight = 0,
                         StyleSheet = "QPushButton{border-radius:0px;border:1px solid #5A607A;background:#1A1F2C;color:#9AA4C2;padding:2px 8px;}QPushButton:hover{background:#252A3A;}QPushButton:disabled{color:#3A3F52;}"})
                 }),
@@ -3573,10 +4098,12 @@ local function build_ui()
         local button_ids = {
             "tabImageBtn", "tabMovieBtn", "tabConfigBtn", "uiRefreshBtn",
             "imgRefreshModelsBtn", "imgToken1Btn", "imgToken2Btn", "imgToken3Btn", "imgToken4Btn", "imgToken5Btn", "imgToken6Btn", "imgToken7Btn", "imgToken8Btn", "imgInlineTokenInsertBtn",
-            "imgGalleryUseBtn", "imgGalleryDeleteBtn", "imgGalleryPasteBtn", "imgGalleryLoadBtn", "imgGalleryAddPoolBtn", "imgUndoRefBtn", "imgOpenResultBtn",
+            "imgGalleryBrowseBtn", "imgGalleryScrollUp", "imgGalleryScrollDn",
+            "imgGalleryUseBtn", "imgGalleryDeleteBtn", "imgGalleryFindBtn", "imgGalleryPasteBtn", "imgGalleryLoadBtn", "imgGalleryAddPoolBtn", "imgUndoRefBtn", "imgOpenResultBtn",
             "imgGrabBtn", "imgClearBtn", "imgGenerateBtn", "imgKeepEditingBtn", "imgAddPoolBtn", "imgCloseBtn",
             "movieRefreshModelsBtn", "movieToken1Btn", "movieToken2Btn", "movieToken3Btn", "movieInlineTokenInsertBtn",
-            "movieGalleryUseBtn", "movieGalleryDeleteBtn", "movieGalleryPasteBtn", "movieGalleryLoadBtn", "movieGalleryAddPoolBtn", "movieUndoRefBtn", "movieOpenResultBtn",
+            "movieGalleryBrowseBtn", "movieGalleryScrollUp", "movieGalleryScrollDn",
+            "movieGalleryUseBtn", "movieGalleryDeleteBtn", "movieGalleryFindBtn", "movieGalleryPasteBtn", "movieGalleryLoadBtn", "movieGalleryAddPoolBtn", "movieUndoRefBtn", "movieOpenResultBtn",
             "movieGrabBtn", "movieClearBtn", "movieGenerateBtn", "movieKeepEditingBtn", "movieExtendBtn", "movieAddPoolBtn", "moviePlayBtn", "movieCloseBtn",
             "cfgGeminiTestBtn", "cfgSaveBtn", "cfgSaveDirBrowseBtn", "cfgPoolDirBrowseBtn", "cfgOpenReadmeBtn", "cfgCheckUpdatesBtn", "cfgGetApiKeyBtn"
         }
@@ -3799,16 +4326,36 @@ local function build_ui()
         refresh_gallery_ui()
     end
 
-    function win.On.imgGalleryScroll.ValueChanged()
-        if App.State.gallery_scroll_sync then return end
-        App.State.image_gallery_offset = math.max(1, tonumber(items.imgGalleryScroll.Value) or 1)
-        refresh_gallery_buttons("image")
+    -- ▲/▼ inline gallery step buttons
+    local function gallery_step(tab, dir)
+        local list     = (tab == "movie") and App.State.movie_gallery_list or App.State.image_gallery_list
+        local page     = (tab == "movie") and (App.State.movie_gallery_page_size or 4)
+                         or (App.State.image_gallery_page_size or 4)
+        local max_off  = math.max(1, #list - page + 1)
+        local off_key  = (tab == "movie") and "movie_gallery_offset" or "image_gallery_offset"
+        local cur      = App.State[off_key] or 1
+        local new_off  = math.max(1, math.min(max_off, cur + dir))
+        App.State[off_key] = new_off
+        refresh_gallery_buttons(tab)
     end
 
-    function win.On.movieGalleryScroll.ValueChanged()
-        if App.State.gallery_scroll_sync then return end
-        App.State.movie_gallery_offset = math.max(1, tonumber(items.movieGalleryScroll.Value) or 1)
-        refresh_gallery_buttons("movie")
+    function win.On.imgGalleryScrollUp.Clicked()   gallery_step("image", -1) end
+    function win.On.imgGalleryScrollDn.Clicked()   gallery_step("image",  1) end
+    function win.On.movieGalleryScrollUp.Clicked() gallery_step("movie", -1) end
+    function win.On.movieGalleryScrollDn.Clicked() gallery_step("movie",  1) end
+
+    -- Browse Gallery window (calls via App._galFn to avoid adding upvalues to build_ui)
+    function win.On.imgGalleryBrowseBtn.Clicked()   App._galFn.browse("image") end
+    function win.On.movieGalleryBrowseBtn.Clicked() App._galFn.browse("movie") end
+
+    -- Reveal in Finder from inline gallery
+    function win.On.imgGalleryFindBtn.Clicked()
+        local _, msg = App._galFn.find("image")
+        set_image_status(msg)
+    end
+    function win.On.movieGalleryFindBtn.Clicked()
+        local _, msg = App._galFn.find("movie")
+        set_movie_status(msg)
     end
 
     for i = 1, (App.State.gallery_button_count or 12) do
