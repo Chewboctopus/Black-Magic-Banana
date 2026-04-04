@@ -2533,6 +2533,7 @@ local function generate_image_gemini(prompt, refs)
 
     local req = url .. "/models/" .. model .. ":generateContent?key=" .. urlencode(key)
         local ok_req, status, body, err = curl_config_request(req, {["Content-Type"] = "application/json"}, payload_path, App.Config.max_http_seconds)
+    os.remove(payload_path)
     log("[cURL stats] " .. tostring(status) .. " size=" .. tostring(#(body or "")))
 
     if not ok_req then
@@ -2676,6 +2677,7 @@ local function start_veo_operation(payload)
     end)
 
     local ok_req, status, body, err = curl_config_request(req, {"Content-Type: application/json"}, payload_path, App.Config.max_http_seconds)
+    os.remove(payload_path)
     log("[cURL stats] " .. tostring(status) .. " size=" .. tostring(#(body or "")))
 
     if not ok_req then
@@ -3179,13 +3181,25 @@ local function load_settings_from_gallery(tab)
             if i <= (App.State.movie_max_refs or 3) and not is_video_file(p) then
                 local resolved = p
                 if not file_exists(resolved) then
-                    local alt = App.Config.refs_dir .. basename(p)
-                    log("[LoadSettings] fallback path: " .. tostring(alt) .. " | exists=" .. tostring(file_exists(alt)))
-                    if file_exists(alt) then resolved = alt end
+                    local bn = basename(p)
+                    local sidecar_dir = (meta.sidecar or ""):match("^(.+/).*$") or ""
+                    local search_dirs = {
+                        App.Config.refs_dir,
+                        App.Config.output_dir,
+                        App.Config.temp_dir,
+                        sidecar_dir,
+                    }
+                    for _, dir in ipairs(search_dirs) do
+                        local alt = dir .. bn
+                        log("[LoadSettings] fallback: " .. tostring(alt) .. " | exists=" .. tostring(file_exists(alt)))
+                        if file_exists(alt) then resolved = alt; break end
+                    end
                 end
                 if file_exists(resolved) then
                     App.State.movie_refs[i] = resolved
                     mov_refs_loaded = mov_refs_loaded + 1
+                else
+                    log("[LoadSettings] ref[" .. i .. "] not found anywhere, skipping.")
                 end
             end
         end
@@ -3214,12 +3228,24 @@ local function load_settings_from_gallery(tab)
         if i <= (App.State.image_max_refs or 8) then
             local resolved = p
             if not file_exists(resolved) then
-                local alt = App.Config.refs_dir .. basename(p)
-                if file_exists(alt) then resolved = alt end
+                local bn = basename(p)
+                local sidecar_dir = (meta.sidecar or ""):match("^(.+/).*$") or ""
+                local search_dirs = {
+                    App.Config.refs_dir,
+                    App.Config.output_dir,
+                    App.Config.temp_dir,
+                    sidecar_dir,
+                }
+                for _, dir in ipairs(search_dirs) do
+                    local alt = dir .. bn
+                    if file_exists(alt) then resolved = alt; break end
+                end
             end
             if file_exists(resolved) then
                 App.State.image_refs[i] = resolved
                 img_refs_loaded = img_refs_loaded + 1
+            else
+                log("[LoadSettings] image ref[" .. i .. "] not found anywhere, skipping.")
             end
         end
     end
